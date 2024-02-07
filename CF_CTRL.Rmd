@@ -1,0 +1,217 @@
+---
+title: "CF_CTRL"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+In this notebook. only include the analysis of the whole data after filtering, and the integration part. 
+
+```{r,message = FALSE}
+#REPO code for CF_seurat analysis
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(data.table)
+library(R.utils)
+library(ggplot2)
+library(patchwork)
+set.seed(412)
+```
+
+## Read the data
+
+```{r,message = FALSE}
+#load gene matrix
+mat<-Seurat::ReadMtx("./CF_data/GSE145360_Sputum.data.processed.mtx",cells="./CF_data/GSE145360_Sputum.processed.barcodes.tsv",
+                     features="./CF_data/GSE145360_Sputum.processed.genes.tsv", feature.column = 1)
+#load metadata
+meta <- data.frame(fread("https://cells.ucsc.edu/human-sputum/meta.tsv"), row.names=1)
+
+```
+
+## Data to Seurat object
+```{r}
+# Initialize the Seurat object with the raw (non-normalized data).
+#New seurat object for paper analysis
+cf <- CreateSeuratObject(counts = mat, project = "cf", min.cells = 3, min.features = 200,
+                           meta.data=meta)
+
+```
+
+## QC 
+```{r}
+# 1. QC -------
+Idents(cf) <- cf@meta.data$disease.ident
+# get percent mitochondrial genes
+cf[["percent.mt"]] <- PercentageFeatureSet(cf, pattern = "^MT-")
+# Visualize QC metrics as a violin plot
+VlnPlot(cf, features = c("nFeature_RNA", "nCount_RNA", "percent.mt")
+        #, ncol = 3
+        ,group.by = NULL
+        )
+
+plot1 <- FeatureScatter(cf, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(cf, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")+geom_smooth(method = 'lm')
+plot1 + plot2
+
+```
+
+
+## data filtering
+```{r}
+# data filtering -----------------
+cf.1 <- subset(cf, subset = nFeature_RNA>200 & nFeature_RNA < 7000 & percent.mt <5)
+
+# split object
+cf.1[["RNA"]] <- split(cf.1[["RNA"]], f = cf.1$disease.ident)
+```
+
+## normalize data
+```{r}
+# normalize data
+cf.1 <- NormalizeData(cf.1)
+
+# feature selection(find highly variable features)
+cf.1 <- FindVariableFeatures(cf.1, selection.method = "vst", nfeatures = 3000)
+# 
+# ## Identify the 10 most highly variable genes
+# top10 <- head(VariableFeatures(cf.1), 10)
+# 
+# ## plot variable features with and without labels
+# plot1 <- VariableFeaturePlot(cf.1)
+# plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+# plot1 + plot2
+```
+## Data Scale
+```{r}
+# scale to mean 0 and variance 1
+all.genes <- rownames(cf.1)
+cf.1<-ScaleData(cf.1, features=all.genes, verbose=F)
+# regress out percentage number of mitochondrial genes
+cf.1 <-ScaleData(cf.1, vars.to.regress = c("nFeature_RNA", "nCount_RNA","percent.mt"), do.scale=F, do.center=F, verbose=F)
+```
+
+
+## PCA dimensionaily reduction on subset of scaled variable features
+```{r}
+#PCA dimensionaily reduction on subset of scaled variable features
+cf.1 <- RunPCA(cf.1, features = VariableFeatures(object = cf.1))
+
+#visualize reduced dimensions
+VizDimLoadings(cf.1, dims = 1:10, reduction = "pca")
+
+#dimension heat map(first dimension- primary sources for heterogen.)
+#cells and features ordered by PCA scores
+#DimHeatmap(cf.1, dims = 1:20, cells = 500, balanced = TRUE)
+
+#Determine "dimensionality" of dataset (paper used 12)
+ElbowPlot(cf.1, ndims=20, reduction="pca")
+```
+
+
+
+
+
+## Perform streamlined (one-line) integrative analysis
+We use rpca here after comparing our results with CCA and Harmony.
+```{r}
+# Perform streamlined (one-line) integrative analysis--------------------
+CF_integration.1 <- IntegrateLayers(
+  object = cf.1, method = RPCAIntegration,
+  orig.reduction = "pca", new.reduction = 'integrated.rpca',
+  verbose = FALSE)
+
+
+CF_integration.1 <- FindNeighbors(CF_integration.1, reduction = "integrated.rpca", dims = 1:15)
+CF_integration.1 <- FindClusters(CF_integration.1, resolution =c(0.1,0.2,0.3,0.5), cluster.name = c("rpca_clusters_0.1","rpca_clusters_0.2","rpca_clusters_0.3","rpca_clusters_0.5"))
+CF_integration.1 <- RunUMAP(CF_integration.1, reduction = "integrated.rpca", dims = 1:15, reduction.name = "umap.rpca")
+
+```
+
+```{r}
+
+DimPlot(CF_integration.1, reduction = "umap.rpca"
+        , group.by = c("rpca_clusters_0.1","rpca_clusters_0.2"
+                       ,"rpca_clusters_0.3","rpca_clusters_0.5")
+        ,label = T)
+# 
+# DimPlot(CF_integration.1, reduction = "umap.unintegrated"
+#         , group.by = c("rpca_clusters_0.1","rpca_clusters_0.2"
+#                        ,"rpca_clusters_0.3","rpca_clusters_0.5")
+#         ,label = T)
+
+```
+
+## findConserved markers
+
+```{r}
+# findConserved markers (resolution=0.1)--------------------
+CF_integration.1 <- JoinLayers(CF_integration.1)
+Idents(CF_integration.1) <- CF_integration.1@meta.data$rpca_clusters_0.1
+
+# cluster0
+marker_r1_0 <- FindConservedMarkers(CF_integration.1, ident.1 = 0, grouping.var = "disease.ident", verbose = FALSE)
+head(marker_r1_0,20)
+#FCGR3B,CXCR2,ALPL -- PMN by paper
+VlnPlot(CF_integration.1, features=c("CXCR4", "IGF2R","ALPL"))
+VlnPlot(CF_integration.1, features=c("FCGR3B", "CXCR2","ALPL"))
+
+```
+
+
+```{r}
+# MRC1 or MARCO typically detected on alvMΦs 
+VlnPlot(CF_integration.1, features=c("MRC1", "MARCO"))
+```
+After several searches, we name each cluster and plot the named clusters as below:
+
+```{r}
+CF_integration.1 <- RenameIdents(CF_integration.1, `0` = 'PMN')
+CF_integration.1 <- RenameIdents(CF_integration.1, `1` = 'AM2')
+CF_integration.1 <- RenameIdents(CF_integration.1, `2` = 'M/Momo')# 
+CF_integration.1 <- RenameIdents(CF_integration.1, `3` = 'epithelial')
+CF_integration.1 <- RenameIdents(CF_integration.1, `4` = 'T/B')
+CF_integration.1 <- RenameIdents(CF_integration.1, `5` = 'AM1')
+
+```
+```{r}
+# plot_clustering1 <- DimPlot(CF_integration.1,reduction = c("umap.unintegrated")
+#         , label.size = 4,label = T)
+plot_clustering2 <- DimPlot(CF_integration.1,reduction = c("umap.rpca")
+          , label.size = 4,label = T)
+# plot_clustering1|
+plot_clustering2
+
+DimPlot(CF_integration.1,reduction = c("umap.rpca")
+          ,split.by = 'disease.ident',, label.size = 4,label = T)
+```
+
+## findMarkers between CF vs. Control
+
+```{r}
+# findMarkers between conditions ---------------------
+CF_integration.1$celltype.cnd <- paste0(CF_integration.1$rpca_clusters_0.1,'_', CF_integration.1$disease.ident)
+#View(CF_integration.1@meta.data)
+Idents(CF_integration.1) <- CF_integration.1$celltype.cnd
+DimPlot(CF_integration.1, reduction = 'umap.rpca', label = TRUE)
+```
+
+
+
+```{r}
+# find markers
+b.interferon.response <- FindMarkers(CF_integration.1, ident.1 = '1_CF', ident.2 = '1_CTRL')
+
+head(b.interferon.response)
+```
+
+
+```{r}
+# plotting conserved features vs DE features between conditions
+#head(marker_r1_1)
+FeaturePlot(CF_integration.1, features = c('G0S2', 'PRKCB', 'ANO5','AC026369.3'), split.by = 'disease.ident', min.cutoff = 'q10')
+```
+
