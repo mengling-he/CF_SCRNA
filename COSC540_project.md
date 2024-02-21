@@ -1,7 +1,7 @@
 # Use R package Seurat to analysi scRNA data
 
 ## Team member: Mengling He
-- Please email me if you're interested in this kind of project
+
 
 ## Background:  
 
